@@ -2,6 +2,7 @@ use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Write};
 use std::process::exit;
+use std::rc::Rc;
 use std::str::{self};
 
 /// Action for the REPL to perform.
@@ -55,45 +56,38 @@ fn eval(raw_command: &str, buf_out: &mut impl Write) -> Result<Action> {
         return Ok(Action::Continue);
     };
 
-    let mut command_by_name: HashMap<&str, Box<dyn Command>> = HashMap::new();
-    command_by_name.insert("echo", Box::new(EchoCommand {}));
-    command_by_name.insert("exit", Box::new(ExitCommand {}));
-    let invalid_command: Box<dyn Command> = Box::new(InvalidCommand {});
+    let command = get_command_by_name(command_name);
+    command(&args, buf_out)
+}
+
+type Command = dyn Fn(&[&str], &mut dyn Write) -> Result<Action>;
+
+/// Returns an immutable smart pointer (reference-counted) to a function for this command.
+fn get_command_by_name(command_name: &str) -> Rc<Command> {
+    let mut command_by_name: HashMap<&str, Rc<Command>> = HashMap::new();
+    command_by_name.insert("echo", Rc::new(execute_echo));
+    command_by_name.insert("exit", Rc::new(execute_exit));
+    let invalid_command: Rc<Command> = Rc::new(execute_invalid);
 
     let command = command_by_name
         .get(command_name)
         .unwrap_or_else(|| &invalid_command);
-    command.execute(&args, buf_out)
+    command.clone()
 }
 
-/// Represents a command that can be executed.
-trait Command {
-    /// Executes this command with the given `args`.
-    fn execute(&self, args: &[&str], buf_out: &mut dyn Write) -> Result<Action>;
+fn execute_echo(args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
+    write_to_buffer(buf_out, format!("{}\n", args[1..].join(" ")))?;
+    Ok(Action::Continue)
 }
 
-struct EchoCommand {}
-impl Command for EchoCommand {
-    fn execute(&self, args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
-        write_to_buffer(buf_out, format!("{}\n", args[1..].join(" ")))?;
-        Ok(Action::Continue)
-    }
+fn execute_exit(_args: &[&str], _buf_out: &mut dyn Write) -> Result<Action> {
+    Ok(Action::Exit)
 }
 
-struct ExitCommand {}
-impl Command for ExitCommand {
-    fn execute(&self, _args: &[&str], _buf_out: &mut dyn Write) -> Result<Action> {
-        Ok(Action::Exit)
-    }
-}
-
-struct InvalidCommand {}
-impl Command for InvalidCommand {
-    fn execute(&self, args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
-        let &command_name = args.get(0).ok_or_else(|| anyhow!("expected an arg"))?;
-        write_to_buffer(buf_out, format!("{command_name}: command not found\n"))?;
-        Ok(Action::Continue)
-    }
+fn execute_invalid(args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
+    let &command_name = args.get(0).ok_or_else(|| anyhow!("expected an arg"))?;
+    write_to_buffer(buf_out, format!("{command_name}: command not found\n"))?;
+    Ok(Action::Continue)
 }
 
 fn write_to_buffer(buf_out: &mut dyn Write, msg: impl AsRef<str>) -> Result<()> {
