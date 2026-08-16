@@ -26,10 +26,11 @@ fn main() -> Result<()> {
         };
 
         // Eval
-        let result = eval(&command, &mut buf_out)?;
+        let result = eval(&command, &mut buf_out);
         match result {
-            Action::Exit => exit(0),
-            Action::Continue => {}
+            Err(err) => write_to_buffer(&mut buf_out, err.to_string())?,
+            Ok(Action::Exit) => exit(0),
+            Ok(Action::Continue) => {}
         };
     }
 }
@@ -57,17 +58,39 @@ fn eval(raw_command: &str, buf_out: &mut impl Write) -> Result<Action> {
     };
 
     let command = get_command_by_name(command_name);
-    command(&args, buf_out)
+    (command.execute)(&args, buf_out)
 }
 
-type Command = dyn Fn(&[&str], &mut dyn Write) -> Result<Action>;
+/// Represents a command that can be executed.
+#[derive(Clone)]
+struct Command {
+    builtin: bool,
+    execute: Rc<dyn Fn(&[&str], &mut dyn Write) -> Result<Action>>,
+}
+
+impl Command {
+    fn builtin(execute: Rc<dyn Fn(&[&str], &mut dyn Write) -> Result<Action>>) -> Command {
+        Command {
+            builtin: true,
+            execute,
+        }
+    }
+
+    fn invalid(execute: Rc<dyn Fn(&[&str], &mut dyn Write) -> Result<Action>>) -> Command {
+        Command {
+            builtin: false,
+            execute,
+        }
+    }
+}
 
 /// Returns an immutable smart pointer (reference-counted) to a function for this command.
-fn get_command_by_name(command_name: &str) -> Rc<Command> {
-    let mut command_by_name: HashMap<&str, Rc<Command>> = HashMap::new();
-    command_by_name.insert("echo", Rc::new(execute_echo));
-    command_by_name.insert("exit", Rc::new(execute_exit));
-    let invalid_command: Rc<Command> = Rc::new(execute_invalid);
+fn get_command_by_name(command_name: &str) -> Command {
+    let mut command_by_name: HashMap<&str, Command> = HashMap::new();
+    command_by_name.insert("echo", Command::builtin(Rc::new(execute_echo)));
+    command_by_name.insert("exit", Command::builtin(Rc::new(execute_exit)));
+    command_by_name.insert("type", Command::builtin(Rc::new(execute_type)));
+    let invalid_command: Command = Command::invalid(Rc::new(execute_invalid));
 
     let command = command_by_name
         .get(command_name)
@@ -82,6 +105,18 @@ fn execute_echo(args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
 
 fn execute_exit(_args: &[&str], _buf_out: &mut dyn Write) -> Result<Action> {
     Ok(Action::Exit)
+}
+
+fn execute_type(args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
+    for command_name in args[1..].iter() {
+        let command = get_command_by_name(command_name);
+        if command.builtin {
+            write_to_buffer(buf_out, format!("{command_name} is a shell builtin\n"))?;
+        } else {
+            write_to_buffer(buf_out, format!("{command_name}: not found\n"))?;
+        }
+    }
+    Ok(Action::Continue)
 }
 
 fn execute_invalid(args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
@@ -158,6 +193,39 @@ mod tests {
         let result = eval("exit", &mut buf_out)?;
         assert!(buf_out.is_empty());
         assert_eq!(result, Action::Exit);
+        Ok(())
+    }
+
+    #[test]
+    fn eval_type_empty() -> Result<()> {
+        let mut buf_out: Vec<u8> = Vec::new();
+        let result = eval("type", &mut buf_out)?;
+        assert_eq!(str::from_utf8(&buf_out)?, "");
+        assert_eq!(result, Action::Continue);
+        Ok(())
+    }
+
+    #[test]
+    fn eval_type_builtins() -> Result<()> {
+        let mut buf_out: Vec<u8> = Vec::new();
+        let result = eval("type echo type", &mut buf_out)?;
+        assert_eq!(
+            str::from_utf8(&buf_out)?,
+            "echo is a shell builtin\ntype is a shell builtin\n"
+        );
+        assert_eq!(result, Action::Continue);
+        Ok(())
+    }
+
+    #[test]
+    fn eval_type_mixed() -> Result<()> {
+        let mut buf_out: Vec<u8> = Vec::new();
+        let result = eval("type abacadabra exit 123456789", &mut buf_out)?;
+        assert_eq!(
+            str::from_utf8(&buf_out)?,
+            "abacadabra: not found\nexit is a shell builtin\n123456789: not found\n"
+        );
+        assert_eq!(result, Action::Continue);
         Ok(())
     }
 }
