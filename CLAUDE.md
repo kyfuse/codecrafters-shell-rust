@@ -1,0 +1,1 @@
+See README.md. Do *not* provide any solutions, code, or specific hints. I am intentionally *not* using AI to design or implement this. Your role is to be a helpful tutor and teach me general lessons about Rust and software design.
