@@ -1,4 +1,5 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
+use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Write};
 use std::process::exit;
 use std::str::{self};
@@ -50,24 +51,52 @@ fn read_line_from_buffer(buf: &mut impl BufRead) -> Result<Option<String>> {
 /// Executes the given `raw_command`. Returns the action to perform next.
 fn eval(raw_command: &str, buf_out: &mut impl Write) -> Result<Action> {
     let args: Vec<&str> = raw_command.split_whitespace().collect();
-    let Some(&command) = args.get(0) else {
+    let Some(&command_name) = args.get(0) else {
         return Ok(Action::Continue);
     };
 
-    match command {
-        "echo" => {
-            write_to_buffer(buf_out, format!("{}\n", args[1..].join(" ")))?;
-            Ok(Action::Continue)
-        }
-        "exit" => Ok(Action::Exit),
-        _ => {
-            write_to_buffer(buf_out, format!("{command}: command not found\n"))?;
-            Ok(Action::Continue)
-        }
+    let mut command_by_name: HashMap<&str, Box<dyn Command>> = HashMap::new();
+    command_by_name.insert("echo", Box::new(EchoCommand {}));
+    command_by_name.insert("exit", Box::new(ExitCommand {}));
+    let invalid_command: Box<dyn Command> = Box::new(InvalidCommand {});
+
+    let command = command_by_name
+        .get(command_name)
+        .unwrap_or_else(|| &invalid_command);
+    command.execute(&args, buf_out)
+}
+
+/// Represents a command that can be executed.
+trait Command {
+    /// Executes this command with the given `args`.
+    fn execute(&self, args: &[&str], buf_out: &mut dyn Write) -> Result<Action>;
+}
+
+struct EchoCommand {}
+impl Command for EchoCommand {
+    fn execute(&self, args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
+        write_to_buffer(buf_out, format!("{}\n", args[1..].join(" ")))?;
+        Ok(Action::Continue)
     }
 }
 
-fn write_to_buffer(buf_out: &mut impl Write, msg: impl AsRef<str>) -> Result<()> {
+struct ExitCommand {}
+impl Command for ExitCommand {
+    fn execute(&self, _args: &[&str], _buf_out: &mut dyn Write) -> Result<Action> {
+        Ok(Action::Exit)
+    }
+}
+
+struct InvalidCommand {}
+impl Command for InvalidCommand {
+    fn execute(&self, args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
+        let &command_name = args.get(0).ok_or_else(|| anyhow!("expected an arg"))?;
+        write_to_buffer(buf_out, format!("{command_name}: command not found\n"))?;
+        Ok(Action::Continue)
+    }
+}
+
+fn write_to_buffer(buf_out: &mut dyn Write, msg: impl AsRef<str>) -> Result<()> {
     buf_out.write(msg.as_ref().as_bytes())?;
     Ok(())
 }
