@@ -112,7 +112,6 @@ fn check_executable_path(command_name: &str) -> Option<Command> {
         .into_iter()
         .filter(|path_dir| path_dir.is_dir())
         .collect();
-    dbg!(&path_dirs);
 
     for path_dir in path_dirs.iter() {
         let Ok(command_path) = path_dir.join(command_name).canonicalize() else { continue };
