@@ -1,12 +1,12 @@
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
-use std::io::{self, BufRead, BufReader, Write};
-use std::process;
-use std::rc::Rc;
-use std::str::{self};
-use std::path::PathBuf;
 use std::env;
+use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
+use std::process::self;
+use std::rc::Rc;
+use std::str::self;
 
 /// Action for the REPL to perform.
 #[derive(Debug, PartialEq)]
@@ -87,14 +87,32 @@ impl Command {
 
         Command::Invalid
     }
+
+    /// Executes this command with the given arguments and output buffer. Returns the next action a REPL should take.
+    fn execute(&self, args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
+        match self {
+            Command::Builtin { execute } => execute(&args, buf_out),
+            Command::Executable { path } => {
+                process::Command::new(path).args(&args[1..]).spawn()?.wait()?;
+                Ok(Action::Continue)
+            }
+            Command::Invalid => {
+                let &command_name = args.get(0).ok_or_else(|| anyhow!("expected an arg"))?;
+                write_to_buffer(buf_out, format!("{command_name}: command not found\n"))?;
+                Ok(Action::Continue)
+            }
+        }
+    }
 }
 
 /// Returns an executable command if the program exists in PATH.
 fn check_executable_path(command_name: &str) -> Option<Command> {
+    // TODO: Consider handling raw paths (e.g. /usr/bin/python3).
     let path_dirs: Vec<PathBuf> = parse_path_env()
         .into_iter()
         .filter(|path_dir| path_dir.is_dir())
         .collect();
+    dbg!(&path_dirs);
 
     for path_dir in path_dirs.iter() {
         let Ok(command_path) = path_dir.join(command_name).canonicalize() else { continue };
@@ -123,17 +141,7 @@ fn eval(raw_command: &str, buf_out: &mut impl Write) -> Result<Action> {
         return Ok(Action::Continue);
     };
 
-    match Command::from_name(command_name) {
-        Command::Builtin { execute } => execute(&args, buf_out),
-        Command::Executable { path: _ } => todo!(),
-        Command::Invalid => handle_invalid(&args, buf_out),
-    }
-}
-
-fn handle_invalid(args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
-    let &command_name = args.get(0).ok_or_else(|| anyhow!("expected an arg"))?;
-    write_to_buffer(buf_out, format!("{command_name}: command not found\n"))?;
-    Ok(Action::Continue)
+    Command::from_name(command_name).execute(&args, buf_out)
 }
 
 /// Echoes the given arguments to stdout.
@@ -198,6 +206,24 @@ use super::*;
     }
 
     // ========== Eval tests ==========
+
+    #[test]
+    fn eval_handles_executable() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let filepath = temp.path().join("my_executable");
+        let file = File::create(&filepath)?;
+        file.set_permissions(Permissions::from_mode(0o777))?;
+
+        unsafe {
+            env::set_var("PATH", temp.path());
+        }
+
+        let mut buf_out: Vec<u8> = Vec::new();
+        let result = eval("my_executable", &mut buf_out)?;
+        assert_eq!(str::from_utf8(&buf_out)?, "");
+        assert_eq!(result, Action::Continue);
+        Ok(())
+    }
 
     #[test]
     fn eval_handles_invalid_command() -> Result<()> {
