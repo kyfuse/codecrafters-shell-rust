@@ -173,8 +173,10 @@ fn write_to_buffer(buf_out: &mut dyn Write, msg: impl AsRef<str>) -> Result<()> 
     Ok(())
 }
 
+// TODO: Remove the need for serial tests.
 #[cfg(test)]
 mod tests {
+    use serial_test::serial;
     use std::env;
     use std::fs::{File, Permissions};
     use tempfile;
@@ -208,6 +210,7 @@ use super::*;
     // ========== Eval tests ==========
 
     #[test]
+    #[serial]
     fn eval_handles_executable() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let filepath = temp.path().join("my_executable");
@@ -283,6 +286,7 @@ use super::*;
     }
 
     #[test]
+    #[serial]
     fn eval_type_executable() -> Result<()> {
         let temp1 = tempfile::tempdir()?;
         let filepath1 = temp1.path().join("hello123");
@@ -317,6 +321,7 @@ use super::*;
     }
 
     #[test]
+    #[serial]
     fn eval_type_mixed() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let filepath = temp.path().join("my_executable");
