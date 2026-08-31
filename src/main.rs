@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Write};
-use std::process::exit;
+use std::process;
 use std::rc::Rc;
 use std::str::{self};
 use std::path::PathBuf;
@@ -25,14 +25,14 @@ fn main() -> Result<()> {
 
         let Some(command) = read_line_from_buffer(&mut buf_in)? else {
             // Reached EOF; exit
-            exit(0);
+            process::exit(0);
         };
 
         // Eval
         let result = eval(&command, &mut buf_out);
         match result {
             Err(err) => write_to_buffer(&mut buf_out, err.to_string())?,
-            Ok(Action::Exit) => exit(0),
+            Ok(Action::Exit) => process::exit(0),
             Ok(Action::Continue) => {}
         };
     }
@@ -53,6 +53,69 @@ fn read_line_from_buffer(buf: &mut impl BufRead) -> Result<Option<String>> {
     }
 }
 
+/// Represents a command that can be executed.
+#[derive(Clone)]
+enum Command {
+    Builtin {
+        execute: Rc<dyn Fn(&[&str], &mut dyn Write) -> Result<Action>>,
+    },
+    Executable {
+        path: PathBuf
+    },
+    Invalid
+}
+
+impl Command {
+    fn builtin(execute: Rc<dyn Fn(&[&str], &mut dyn Write) -> Result<Action>>) -> Command {
+        Command::Builtin { execute }
+    }
+
+    /// Returns an immutable smart pointer (reference-counted) to a function for this command.
+    fn from_name(command_name: &str) -> Command {
+        let mut builtin_by_name: HashMap<&str, Command> = HashMap::new();
+        builtin_by_name.insert("echo", Command::builtin(Rc::new(execute_echo)));
+        builtin_by_name.insert("exit", Command::builtin(Rc::new(execute_exit)));
+        builtin_by_name.insert("type", Command::builtin(Rc::new(execute_type)));
+
+        if let Some(builtin_command) = builtin_by_name.get(command_name) {
+            return builtin_command.clone()
+        }
+
+        if let Some(executable_command) = check_executable_path(command_name) {
+            return executable_command
+        }
+
+        Command::Invalid
+    }
+}
+
+/// Returns an executable command if the program exists in PATH.
+fn check_executable_path(command_name: &str) -> Option<Command> {
+    let path_dirs: Vec<PathBuf> = parse_path_env()
+        .into_iter()
+        .filter(|path_dir| path_dir.is_dir())
+        .collect();
+
+    for path_dir in path_dirs.iter() {
+        let Ok(command_path) = path_dir.join(command_name).canonicalize() else { continue };
+        if !command_path.is_file() { continue; }
+        let Ok(metadata) = command_path.metadata() else { continue };
+        // Executable iff at least one executable bit is set
+        if metadata.permissions().mode() & 0o111 == 0 { continue };
+
+        return Some(Command::Executable { path: command_path });
+    }
+    None
+}
+
+/// Parses the PATH environment variable into a list of directories.
+fn parse_path_env() -> Vec<PathBuf> {
+    match env::var_os("PATH") {
+        Some(paths) => env::split_paths(&paths).collect(),
+        None => Vec::new()
+    }
+}
+
 /// Executes the given `raw_command`. Returns the action to perform next.
 fn eval(raw_command: &str, buf_out: &mut impl Write) -> Result<Action> {
     let args: Vec<&str> = raw_command.split_whitespace().collect();
@@ -60,45 +123,17 @@ fn eval(raw_command: &str, buf_out: &mut impl Write) -> Result<Action> {
         return Ok(Action::Continue);
     };
 
-    let command = get_command_by_name(command_name);
-    (command.execute)(&args, buf_out)
-}
-
-/// Represents a command that can be executed.
-#[derive(Clone)]
-struct Command {
-    builtin: bool,
-    execute: Rc<dyn Fn(&[&str], &mut dyn Write) -> Result<Action>>,
-}
-
-impl Command {
-    fn builtin(execute: Rc<dyn Fn(&[&str], &mut dyn Write) -> Result<Action>>) -> Command {
-        Command {
-            builtin: true,
-            execute,
-        }
-    }
-
-    fn invalid(execute: Rc<dyn Fn(&[&str], &mut dyn Write) -> Result<Action>>) -> Command {
-        Command {
-            builtin: false,
-            execute,
-        }
+    match Command::from_name(command_name) {
+        Command::Builtin { execute } => execute(&args, buf_out),
+        Command::Executable { path: _ } => todo!(),
+        Command::Invalid => handle_invalid(&args, buf_out),
     }
 }
 
-/// Returns an immutable smart pointer (reference-counted) to a function for this command.
-fn get_command_by_name(command_name: &str) -> Command {
-    let mut command_by_name: HashMap<&str, Command> = HashMap::new();
-    command_by_name.insert("echo", Command::builtin(Rc::new(execute_echo)));
-    command_by_name.insert("exit", Command::builtin(Rc::new(execute_exit)));
-    command_by_name.insert("type", Command::builtin(Rc::new(execute_type)));
-    let invalid_command: Command = Command::invalid(Rc::new(execute_invalid));
-
-    let command = command_by_name
-        .get(command_name)
-        .unwrap_or_else(|| &invalid_command);
-    command.clone()
+fn handle_invalid(args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
+    let &command_name = args.get(0).ok_or_else(|| anyhow!("expected an arg"))?;
+    write_to_buffer(buf_out, format!("{command_name}: command not found\n"))?;
+    Ok(Action::Continue)
 }
 
 /// Echoes the given arguments to stdout.
@@ -112,48 +147,16 @@ fn execute_exit(_args: &[&str], _buf_out: &mut dyn Write) -> Result<Action> {
     Ok(Action::Exit)
 }
 
-/// Determines the type of each provided command (a shell builtin, executable, or not found).
+/// Outputs the type of each provided command (a shell builtin, executable, or not found).
 fn execute_type(args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
-    let path_dirs: Vec<PathBuf> = parse_path_env()
-        .into_iter()
-        .filter(|path_dir| path_dir.is_dir())
-        .collect();
-
-    'outer: for &command_name in args[1..].iter() {
-        // Check if command is a shell builtin
-        if get_command_by_name(command_name).builtin {
-            write_to_buffer(buf_out, format!("{command_name} is a shell builtin\n"))?;
-            continue;
-        }
-
-        // Check if command is an executable in PATH
-        for path_dir in path_dirs.iter() {
-            let Ok(command_path) = path_dir.join(command_name).canonicalize() else { continue };
-            if !command_path.is_file() { continue; }
-            let Ok(metadata) = command_path.metadata() else { continue };
-            // Executable iff at least one executable bit is set
-            if metadata.permissions().mode() & 0o111 == 0 { continue };
-
-            write_to_buffer(buf_out, format!("{command_name} is {}\n", command_path.display()))?;
-            continue 'outer;
-        }
-
-        write_to_buffer(buf_out, format!("{command_name}: not found\n"))?;
+    for &command_name in args[1..].iter() {
+        let msg = match Command::from_name(command_name) {
+            Command::Builtin { execute: _ } => format!("{command_name} is a shell builtin\n"),
+            Command::Executable { path } => format!("{command_name} is {}\n", path.display()),
+            Command::Invalid => format!("{command_name}: not found\n"),
+        };
+        write_to_buffer(buf_out, msg)?;
     }
-    Ok(Action::Continue)
-}
-
-/// Parses the PATH environment variable into a list of directories.
-fn parse_path_env() -> Vec<PathBuf> {
-    match env::var_os("PATH") {
-        Some(paths) => env::split_paths(&paths).collect(),
-        None => Vec::new()
-    }
-}
-
-fn execute_invalid(args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
-    let &command_name = args.get(0).ok_or_else(|| anyhow!("expected an arg"))?;
-    write_to_buffer(buf_out, format!("{command_name}: command not found\n"))?;
     Ok(Action::Continue)
 }
 
