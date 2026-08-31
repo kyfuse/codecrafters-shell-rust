@@ -60,6 +60,7 @@ enum Command {
         execute: Rc<dyn Fn(&[&str], &mut dyn Write) -> Result<Action>>,
     },
     Executable {
+        name: String,
         path: PathBuf
     },
     Invalid
@@ -92,8 +93,8 @@ impl Command {
     fn execute(&self, args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
         match self {
             Command::Builtin { execute } => execute(&args, buf_out),
-            Command::Executable { path } => {
-                process::Command::new(path).args(&args[1..]).spawn()?.wait()?;
+            Command::Executable { name, path: _ } => {
+                process::Command::new(name).args(&args[1..]).spawn()?.wait()?;
                 Ok(Action::Continue)
             }
             Command::Invalid => {
@@ -120,7 +121,10 @@ fn check_executable_path(command_name: &str) -> Option<Command> {
         // Executable iff at least one executable bit is set
         if metadata.permissions().mode() & 0o111 == 0 { continue };
 
-        return Some(Command::Executable { path: command_path });
+        return Some(Command::Executable {
+            name: command_name.to_string(),
+            path: command_path
+        });
     }
     None
 }
@@ -159,7 +163,7 @@ fn execute_type(args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
     for &command_name in args[1..].iter() {
         let msg = match Command::from_name(command_name) {
             Command::Builtin { execute: _ } => format!("{command_name} is a shell builtin\n"),
-            Command::Executable { path } => format!("{command_name} is {}\n", path.display()),
+            Command::Executable { name: _, path } => format!("{command_name} is {}\n", path.display()),
             Command::Invalid => format!("{command_name}: not found\n"),
         };
         write_to_buffer(buf_out, msg)?;
