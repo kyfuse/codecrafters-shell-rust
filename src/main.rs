@@ -4,6 +4,9 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::process::exit;
 use std::rc::Rc;
 use std::str::{self};
+use std::path::PathBuf;
+use std::env;
+use std::os::unix::fs::PermissionsExt;
 
 /// Action for the REPL to perform.
 #[derive(Debug, PartialEq)]
@@ -98,25 +101,54 @@ fn get_command_by_name(command_name: &str) -> Command {
     command.clone()
 }
 
+/// Echoes the given arguments to stdout.
 fn execute_echo(args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
     write_to_buffer(buf_out, format!("{}\n", args[1..].join(" ")))?;
     Ok(Action::Continue)
 }
 
+/// Exits the shell.
 fn execute_exit(_args: &[&str], _buf_out: &mut dyn Write) -> Result<Action> {
     Ok(Action::Exit)
 }
 
+/// Determines the type of each provided command (a shell builtin, executable, or not found).
 fn execute_type(args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
-    for command_name in args[1..].iter() {
-        let command = get_command_by_name(command_name);
-        if command.builtin {
+    let path_dirs: Vec<PathBuf> = parse_path_env()
+        .into_iter()
+        .filter(|path_dir| path_dir.is_dir())
+        .collect();
+
+    'outer: for &command_name in args[1..].iter() {
+        // Check if command is a shell builtin
+        if get_command_by_name(command_name).builtin {
             write_to_buffer(buf_out, format!("{command_name} is a shell builtin\n"))?;
-        } else {
-            write_to_buffer(buf_out, format!("{command_name}: not found\n"))?;
+            continue;
         }
+
+        // Check if command is an executable in PATH
+        for path_dir in path_dirs.iter() {
+            let Ok(command_path) = path_dir.join(command_name).canonicalize() else { continue };
+            if !command_path.is_file() { continue; }
+            let Ok(metadata) = command_path.metadata() else { continue };
+            // Executable iff at least one executable bit is set
+            if metadata.permissions().mode() & 0o111 == 0 { continue };
+
+            write_to_buffer(buf_out, format!("{command_name} is {}\n", command_path.display()))?;
+            continue 'outer;
+        }
+
+        write_to_buffer(buf_out, format!("{command_name}: not found\n"))?;
     }
     Ok(Action::Continue)
+}
+
+/// Parses the PATH environment variable into a list of directories.
+fn parse_path_env() -> Vec<PathBuf> {
+    match env::var_os("PATH") {
+        Some(paths) => env::split_paths(&paths).collect(),
+        None => Vec::new()
+    }
 }
 
 fn execute_invalid(args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
@@ -132,7 +164,11 @@ fn write_to_buffer(buf_out: &mut dyn Write, msg: impl AsRef<str>) -> Result<()> 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::env;
+    use std::fs::{File, Permissions};
+    use tempfile;
+
+use super::*;
 
     #[test]
     fn create_prompt_works() {
@@ -218,12 +254,58 @@ mod tests {
     }
 
     #[test]
-    fn eval_type_mixed() -> Result<()> {
+    fn eval_type_executable() -> Result<()> {
+        let temp1 = tempfile::tempdir()?;
+        let filepath1 = temp1.path().join("hello123");
+        let file1 = File::create(&filepath1)?;
+        file1.set_permissions(Permissions::from_mode(0o744))?;
+
+        let temp2 = tempfile::tempdir()?;
+        let filepath2 = temp2.path().join("world123");
+        let file2 = File::create(&filepath2)?;
+        file2.set_permissions(Permissions::from_mode(0o610))?;
+
+        let filepath3 = temp2.path().join("not_executable");
+        let file3 = File::create(&filepath3)?;
+        file3.set_permissions(Permissions::from_mode(0o644))?;
+
+        unsafe {
+            env::set_var("PATH", env::join_paths([temp1.path(), temp2.path()])?);
+        }
+
         let mut buf_out: Vec<u8> = Vec::new();
-        let result = eval("type abacadabra exit 123456789", &mut buf_out)?;
+        let result = eval("type hello123 world123 not_executable", &mut buf_out)?;
         assert_eq!(
             str::from_utf8(&buf_out)?,
-            "abacadabra: not found\nexit is a shell builtin\n123456789: not found\n"
+            format!(
+                "hello123 is {}\nworld123 is {}\nnot_executable: not found\n",
+                filepath1.canonicalize()?.display(),
+                filepath2.canonicalize()?.display(),
+            )
+        );
+        assert_eq!(result, Action::Continue);
+        Ok(())
+    }
+
+    #[test]
+    fn eval_type_mixed() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let filepath = temp.path().join("my_executable");
+        let file = File::create(&filepath)?;
+        file.set_permissions(Permissions::from_mode(0o777))?;
+
+        unsafe {
+            env::set_var("PATH", temp.path());
+        }
+
+        let mut buf_out: Vec<u8> = Vec::new();
+        let result = eval("type abacadabra my_executable exit 123456789", &mut buf_out)?;
+        assert_eq!(
+            str::from_utf8(&buf_out)?,
+            format!(
+                "abacadabra: not found\nmy_executable is {}\nexit is a shell builtin\n123456789: not found\n",
+                filepath.canonicalize()?.display()
+            )
         );
         assert_eq!(result, Action::Continue);
         Ok(())
