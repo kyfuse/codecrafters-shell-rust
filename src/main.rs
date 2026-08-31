@@ -4,9 +4,9 @@ use std::env;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::process::self;
+use std::process;
 use std::rc::Rc;
-use std::str::self;
+use std::str;
 
 /// Action for the REPL to perform.
 #[derive(Debug, PartialEq)]
