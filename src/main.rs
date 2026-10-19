@@ -77,6 +77,7 @@ impl Command {
         builtin_by_name.insert("echo", Command::builtin(Rc::new(execute_echo)));
         builtin_by_name.insert("exit", Command::builtin(Rc::new(execute_exit)));
         builtin_by_name.insert("type", Command::builtin(Rc::new(execute_type)));
+        builtin_by_name.insert("pwd", Command::builtin(Rc::new(execute_pwd)));
 
         if let Some(builtin_command) = builtin_by_name.get(command_name) {
             return builtin_command.clone()
@@ -168,6 +169,13 @@ fn execute_type(args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
         };
         write_to_buffer(buf_out, msg)?;
     }
+    Ok(Action::Continue)
+}
+
+/// Prints the current working directory.
+fn execute_pwd(_args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
+    let cwd = env::current_dir()?.canonicalize()?;
+    write_to_buffer(buf_out, format!("{}\n", cwd.display()))?;
     Ok(Action::Continue)
 }
 
@@ -345,6 +353,21 @@ use super::*;
             )
         );
         assert_eq!(result, Action::Continue);
+        Ok(())
+    }
+
+    #[test]
+    fn eval_pwd() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let orig_working_dir = env::current_dir()?;
+        env::set_current_dir(temp.path())?;
+
+        let mut buf_out: Vec<u8> = Vec::new();
+        let result = eval("pwd", &mut buf_out)?;
+        assert_eq!(str::from_utf8(&buf_out)?, format!("{}\n", temp.path().canonicalize()?.display()));
+        assert_eq!(result, Action::Continue);
+
+        env::set_current_dir(orig_working_dir)?;
         Ok(())
     }
 }
