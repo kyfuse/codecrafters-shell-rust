@@ -78,6 +78,7 @@ impl Command {
         builtin_by_name.insert("exit", Command::builtin(Rc::new(execute_exit)));
         builtin_by_name.insert("type", Command::builtin(Rc::new(execute_type)));
         builtin_by_name.insert("pwd", Command::builtin(Rc::new(execute_pwd)));
+        builtin_by_name.insert("cd", Command::builtin(Rc::new(execute_cd)));
 
         if let Some(builtin_command) = builtin_by_name.get(command_name) {
             return builtin_command.clone()
@@ -179,6 +180,23 @@ fn execute_pwd(_args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
     Ok(Action::Continue)
 }
 
+/// Changes to the directory given by the first argument. Prints an error if the directory is not found.
+fn execute_cd(args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
+    let Some(&path_str) = args.get(1) else {
+        return Ok(Action::Continue);
+    };
+
+    let path = PathBuf::from(path_str);
+    if !path.is_dir() {
+        write_to_buffer(buf_out, format!("cd: {}: No such file or directory\n", path.display()))?;
+        return Ok(Action::Continue);
+    }
+    
+    env::set_current_dir(path)?;
+    write_to_buffer(buf_out, "")?;
+    Ok(Action::Continue)
+}
+
 fn write_to_buffer(buf_out: &mut dyn Write, msg: impl AsRef<str>) -> Result<()> {
     buf_out.write(msg.as_ref().as_bytes())?;
     Ok(())
@@ -191,8 +209,27 @@ mod tests {
     use std::env;
     use std::fs::{File, Permissions};
     use tempfile;
+    use super::*;
 
-use super::*;
+    /// Runs at the end of tests that require environment cleanup.
+    struct CleanupEnv {
+        orig_working_dir: PathBuf
+    }
+
+    impl CleanupEnv {
+        fn new() -> Result<Self> {
+            Ok(Self {
+                orig_working_dir: env::current_dir()?
+            })
+        }
+    }
+
+    impl Drop for CleanupEnv {
+        fn drop(&mut self) {
+            println!("Cleanup: Resetting cwd to {}", self.orig_working_dir.display());
+            env::set_current_dir(&self.orig_working_dir).unwrap()
+        }
+    }
 
     #[test]
     fn create_prompt_works() {
@@ -357,9 +394,10 @@ use super::*;
     }
 
     #[test]
+    #[serial]
     fn eval_pwd() -> Result<()> {
+        let _cleanup_env = CleanupEnv::new()?;
         let temp = tempfile::tempdir()?;
-        let orig_working_dir = env::current_dir()?;
         env::set_current_dir(temp.path())?;
 
         let mut buf_out: Vec<u8> = Vec::new();
@@ -367,7 +405,38 @@ use super::*;
         assert_eq!(str::from_utf8(&buf_out)?, format!("{}\n", temp.path().canonicalize()?.display()));
         assert_eq!(result, Action::Continue);
 
-        env::set_current_dir(orig_working_dir)?;
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn eval_cd_existing_absolute_path() -> Result<()> {
+        let _cleanup_env = CleanupEnv::new()?;
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().canonicalize()?;
+
+        let mut buf_out: Vec<u8> = Vec::new();
+        let cmd = format!("cd {}", path.display());
+        let result = eval(cmd.as_str(), &mut buf_out)?;
+        assert_eq!(str::from_utf8(&buf_out)?, "");
+        assert_eq!(result, Action::Continue);
+        assert_eq!(env::current_dir()?, path);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn eval_cd_missing_absolute_path() -> Result<()> {
+        let _cleanup_env = CleanupEnv::new()?;
+        let orig_working_dir = env::current_dir()?;
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().canonicalize()?.join("missing");
+
+        let mut buf_out: Vec<u8> = Vec::new();
+        let result = eval(format!("cd {}", path.display()).as_str(), &mut buf_out)?;
+        assert_eq!(str::from_utf8(&buf_out)?, format!("cd: {}: No such file or directory\n", path.display()));
+        assert_eq!(result, Action::Continue);
+        assert_eq!(env::current_dir()?, orig_working_dir);
         Ok(())
     }
 }
