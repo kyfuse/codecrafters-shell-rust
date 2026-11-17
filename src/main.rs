@@ -207,7 +207,7 @@ fn write_to_buffer(buf_out: &mut dyn Write, msg: impl AsRef<str>) -> Result<()> 
 mod tests {
     use serial_test::serial;
     use std::env;
-    use std::fs::{File, Permissions};
+    use std::fs::{File, Permissions, self};
     use tempfile;
     use super::*;
 
@@ -437,6 +437,39 @@ mod tests {
         assert_eq!(str::from_utf8(&buf_out)?, format!("cd: {}: No such file or directory\n", path.display()));
         assert_eq!(result, Action::Continue);
         assert_eq!(env::current_dir()?, orig_working_dir);
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn eval_cd_relative_paths() -> Result<()> {
+        let _cleanup_env = CleanupEnv::new()?;
+        let temp = tempfile::tempdir()?;
+        env::set_current_dir(temp.path())?;
+
+        let path_subdir = temp.path().join("sub");
+        let path_subsubdir = path_subdir.join("dir");
+        fs::create_dir(&path_subdir)?;
+        fs::create_dir(&path_subsubdir)?;
+
+        let mut buf_out1: Vec<u8> = Vec::new();
+        let result1 = eval("cd sub/dir", &mut buf_out1)?;
+        assert_eq!(str::from_utf8(&buf_out1)?, "");
+        assert_eq!(result1, Action::Continue);
+        assert_eq!(env::current_dir()?, path_subsubdir.canonicalize()?);
+
+        let mut buf_out2: Vec<u8> = Vec::new();
+        let result2 = eval("cd ..", &mut buf_out2)?;
+        assert_eq!(str::from_utf8(&buf_out2)?, "");
+        assert_eq!(result2, Action::Continue);
+        assert_eq!(env::current_dir()?, path_subdir.canonicalize()?);
+
+        let mut buf_out3: Vec<u8> = Vec::new();
+        let result3 = eval("cd sub/missing", &mut buf_out3)?;
+        assert_eq!(str::from_utf8(&buf_out3)?, "cd: sub/missing: No such file or directory\n");
+        assert_eq!(result3, Action::Continue);
+        assert_eq!(env::current_dir()?, path_subdir.canonicalize()?);
+
         Ok(())
     }
 }
