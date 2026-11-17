@@ -186,20 +186,17 @@ fn execute_cd(args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
         return Ok(Action::Continue);
     };
 
+    let home_with_remaining_part = (path_str == "~").then_some("").or_else(|| path_str.strip_prefix("~/"));
     let path = match path_str {
-        "~" => {
+        _ if let Some(remaining_part) = home_with_remaining_part => {
             let Some(home_dir) = env::home_dir() else {
                 write_to_buffer(buf_out, format!("cd: {}: Unable to get home directory\n", path_str))?;
                 return Ok(Action::Continue);
             };
-            home_dir
-        }
-        _ if let Some(remaining_path) = path_str.strip_prefix("~/") => {
-            let Some(home_dir) = env::home_dir() else {
-                write_to_buffer(buf_out, format!("cd: {}: Unable to get home directory\n", path_str))?;
-                return Ok(Action::Continue);
-            };
-            home_dir.join(PathBuf::from(remaining_path))
+            match remaining_part {
+                "" => home_dir,
+                _ => home_dir.join(PathBuf::from(remaining_part))
+            }
         }
         _ => PathBuf::from(path_str)
     };
@@ -515,15 +512,21 @@ mod tests {
         assert_eq!(result2, Action::Continue);
         assert_eq!(env::current_dir()?, path_subsubdir.canonicalize()?);
 
+        let mut buf_out3: Vec<u8> = Vec::new();
+        let result3 = eval("cd ~dir", &mut buf_out3)?;
+        assert_eq!(str::from_utf8(&buf_out3)?, "cd: ~dir: No such file or directory\n");
+        assert_eq!(result3, Action::Continue);
+        assert_eq!(env::current_dir()?, path_subsubdir.canonicalize()?);
+
         let path_missing = path_subdir.canonicalize()?.join("missing");
         unsafe {
             env::set_var("HOME", &path_missing);
         }
 
-        let mut buf_out3: Vec<u8> = Vec::new();
-        let result3 = eval("cd ~", &mut buf_out3)?;
-        assert_eq!(str::from_utf8(&buf_out3)?, format!("cd: {}: No such file or directory\n", path_missing.display()));
-        assert_eq!(result3, Action::Continue);
+        let mut buf_out4: Vec<u8> = Vec::new();
+        let result4 = eval("cd ~", &mut buf_out4)?;
+        assert_eq!(str::from_utf8(&buf_out4)?, format!("cd: {}: No such file or directory\n", path_missing.display()));
+        assert_eq!(result4, Action::Continue);
         assert_eq!(env::current_dir()?, path_subsubdir.canonicalize()?);
         Ok(())
     }
