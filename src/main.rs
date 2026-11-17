@@ -186,14 +186,29 @@ fn execute_cd(args: &[&str], buf_out: &mut dyn Write) -> Result<Action> {
         return Ok(Action::Continue);
     };
 
-    let path = PathBuf::from(path_str);
+    let path = match path_str {
+        "~" => {
+            let Some(home_dir) = env::home_dir() else {
+                write_to_buffer(buf_out, format!("cd: {}: Unable to get home directory\n", path_str))?;
+                return Ok(Action::Continue);
+            };
+            home_dir
+        }
+        _ if let Some(remaining_path) = path_str.strip_prefix("~/") => {
+            let Some(home_dir) = env::home_dir() else {
+                write_to_buffer(buf_out, format!("cd: {}: Unable to get home directory\n", path_str))?;
+                return Ok(Action::Continue);
+            };
+            home_dir.join(PathBuf::from(remaining_path))
+        }
+        _ => PathBuf::from(path_str)
+    };
     if !path.is_dir() {
         write_to_buffer(buf_out, format!("cd: {}: No such file or directory\n", path.display()))?;
         return Ok(Action::Continue);
     }
     
     env::set_current_dir(path)?;
-    write_to_buffer(buf_out, "")?;
     Ok(Action::Continue)
 }
 
@@ -470,6 +485,46 @@ mod tests {
         assert_eq!(result3, Action::Continue);
         assert_eq!(env::current_dir()?, path_subdir.canonicalize()?);
 
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn eval_cd_home_dir() -> Result<()> {
+        let _cleanup_env = CleanupEnv::new()?;
+        let temp = tempfile::tempdir()?;
+
+        let path_subdir = temp.path().join("sub");
+        let path_subsubdir = path_subdir.join("dir");
+        fs::create_dir(&path_subdir)?;
+        fs::create_dir(&path_subsubdir)?;
+
+        unsafe {
+            env::set_var("HOME", &path_subdir);
+        }
+
+        let mut buf_out1: Vec<u8> = Vec::new();
+        let result1 = eval("cd ~", &mut buf_out1)?;
+        assert_eq!(str::from_utf8(&buf_out1)?, "");
+        assert_eq!(result1, Action::Continue);
+        assert_eq!(env::current_dir()?, path_subdir.canonicalize()?);
+
+        let mut buf_out2: Vec<u8> = Vec::new();
+        let result2 = eval("cd ~/dir", &mut buf_out2)?;
+        assert_eq!(str::from_utf8(&buf_out2)?, "");
+        assert_eq!(result2, Action::Continue);
+        assert_eq!(env::current_dir()?, path_subsubdir.canonicalize()?);
+
+        let path_missing = path_subdir.canonicalize()?.join("missing");
+        unsafe {
+            env::set_var("HOME", &path_missing);
+        }
+
+        let mut buf_out3: Vec<u8> = Vec::new();
+        let result3 = eval("cd ~", &mut buf_out3)?;
+        assert_eq!(str::from_utf8(&buf_out3)?, format!("cd: {}: No such file or directory\n", path_missing.display()));
+        assert_eq!(result3, Action::Continue);
+        assert_eq!(env::current_dir()?, path_subsubdir.canonicalize()?);
         Ok(())
     }
 }
